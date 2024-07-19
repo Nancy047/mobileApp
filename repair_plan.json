@@ -1,0 +1,16 @@
+[
+    {
+        "task": "Get order list",
+        "confirmation": true
+    },
+    {
+        "task": "Run diagnostics tool",
+        "confirmation": true,
+        "parameters": ["diagnostic_code"]
+    },
+    {
+        "task": "Apply fix",
+        "confirmation": true,
+        "parameters": ["fix_code"]
+    }
+]

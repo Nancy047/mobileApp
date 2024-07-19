@@ -1,0 +1,29 @@
+[
+    {
+        "task": "Autodiscover tool",
+        "parameters": ["Account_DTN", "ethernet_port", "fsan", "model", "cuid"],
+        "confirmation": true
+    },
+    {
+        "task": "Activation tool",
+        "parameters": ["cuid",
+                       "OPTIC_LINE_TRMNL_OLT_CILLI",
+                       "PON_PORT_NUMBER",
+                       "LEG_NUMBER",
+                       "Account_DTN",
+                       "OLT_MAKE",
+                       "fsan",
+                       "LEG_NUMBER",
+                       "TECHNOLOGY",
+                       "O2_SHELF_SLOT_PORT",
+                       "SHELF_SLOT_PORT",
+                       "ethernet_port",
+                       "model",
+                       "PRODUCT_SPEED",
+                       "CLAN",
+                       "VLAN",
+                       "TELNET_IP",
+                       "transaction_id"],
+        "confirmation": true
+    }
+]

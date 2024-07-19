@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+websockets
+pydantic
+requests
+langchain
+langchain-google-vertexai
+google-cloud-aiplatform

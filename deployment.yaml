@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mobileapp
+  namespace: default
+  labels:
+    app: mobileapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mobileapp
+  template:
+    metadata:
+      labels:
+        app: mobileapp
+    spec:
+      containers:
+        - name: mobileapp
+          image: ""
+          ports:
+            - containerPort: 8000
+          
