@@ -63,7 +63,7 @@ class Orchestrator:
  
     async def run_task(self, user_input, websocket: WebSocket):
         session_id = session_manager.create_session()
-        session_manager.update_session_data(session_id, 'user_input', user_input)
+        session_manager.update_session_data(session_id, 'cuid', user_input)
         
         try:
             # Initial step: get order list and prioritize ---
@@ -87,7 +87,7 @@ class Orchestrator:
             
             question = "Do you want to proceed with this order?"
             
-            confirmed = await self.get_confirmation_from_technician(question, prioritized_order, websocket)
+            confirmed = await self.get_confirmation_from_technician(session_id, question, prioritized_order, websocket)
 
             print("Confirmation received:", confirmed)
             if not confirmed:
@@ -139,7 +139,7 @@ class Orchestrator:
                     for param in missing_params:
                         parameter_prompt = await self.generate_prompt(f"Please provide the value for {param}:")
                         print(f"Asking for missing parameter {param}")
-                        param_response = await self.get_input_from_technician(parameter_prompt,param, websocket)
+                        param_response = await self.get_input_from_technician(session_id, parameter_prompt,param, websocket)
                         print(f"Received user input from technician: {param_response}")
                         self.intermediate_parameters[param.strip()] = param_response
                 parameters_dict = {param: self.intermediate_parameters[param] for param in step_details["parameters"]}
@@ -181,13 +181,13 @@ class Orchestrator:
         response = await self.ask_model(f"Generate a prompt for the technician: {prompt_text}")
         return response.strip()
  
-    async def get_confirmation_from_technician(self, question, prioritized_order, websocket: WebSocket):
+    async def get_confirmation_from_technician(self, session_id, question, prioritized_order, websocket: WebSocket):
         #print(f"Asking confirmation with prompt: {prompt}")
         #self.socketio.emit('message', {'request': prompt})
         #response = await self.get_user_input()
         message = {"type": "input", "message":question, "data":json.dumps(prioritized_order)}
         await websocket.send_text(json.dumps(message))
-        response = await websocket.receive_text()
+        response = await self.handle_user_input(websocket, session_id)
         
         print("user responsed with :",response)
         confirmation_check_prompt = f"The technician responded with: {response}. Did they confirm? answer with just (yes/no)"
@@ -196,13 +196,14 @@ class Orchestrator:
         print(f"Confirmation response: {confirmation} interpreted as {confirmed}")
         return confirmed
  
-    async def get_input_from_technician(self, prompt,param, websocket: WebSocket):
+    async def get_input_from_technician(self, session_id, prompt,param, websocket: WebSocket):
         print(f"Asking for input with prompt: {prompt}")
         # self.socketio.emit('message', {'request': prompt})
         # response = await self.get_user_input()
         message = {"type": "input", "message":prompt, "data_needed": param}
+        #handle user input 
         await  websocket.send_text(json.dumps(message))
-        response = await websocket.receive_text()
+        response = await self.handle_user_input(websocket, session_id)
         print(f"Received user input: {response}")
         return response.strip()
  
@@ -231,8 +232,8 @@ class Orchestrator:
             await  websocket.send_text(json.dumps(message))
 
             # Receive response from the technician
-            response = await websocket.receive_text()
-
+            response = await self.handle_user_input(websocket, session_id)
+            
             # Confirm the technician's response using the model
             confirmation_check_prompt = (
                 f"The technician responded with: {response}. "
@@ -276,7 +277,7 @@ class Orchestrator:
                 help_prompt = await self.generate_prompt(help_prompt_description)
                 message = {"type": "input", "message":help_prompt}
                 await websocket.send_text(json.dumps(message))
-                help_response = await websocket.receive_text()
+                help_response = await self.handle_user_input(websocket, session_id)
 
                 follow_up_prompt = await self.generate_prompt(
                     f"Thank you for your request: {help_response}. "
@@ -289,8 +290,18 @@ class Orchestrator:
                 await websocket.send_text(json.dumps(message))
                 await websocket.close()
                 break
-
-
+                
+    async def handle_user_input(self, websocket: WebSocket, session_id):
+        response = await websocket.receive_json()
+        if response['type'] == 'cuid':
+            await self.run_task(response['data'], websocket)
+            await websocket.close()
+        elif response['data'].lower() in ['quit', 'q','exit'] :
+            await websocket.close()
+        else:
+            return response['data'] 
+        
+                
 orchestrator = Orchestrator()
  
 #@orchestrator.app.route('/start_task', methods=['POST'])
@@ -303,13 +314,11 @@ async def start_task(websocket:WebSocket):
     # asyncio.run(orchestrator.run_task(user_input))
     # return {"status": "Task started"}
     await websocket.accept()
-    data = await websocket.receive_json()
-    user_input = data['user_input']
+    
+    response = await websocket.receive_json()
+    user_input = response['data']
     await orchestrator.run_task(user_input, websocket)
     await websocket.close()
-
-# if __name__ == '__main__':
-#     orchestrator.start()
-
+    
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, ping_interval=10)
