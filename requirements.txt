@@ -6,4 +6,3 @@ requests
 langchain
 langchain-google-vertexai
 google-cloud-aiplatform
-pandas

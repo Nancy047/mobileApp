@@ -5,16 +5,16 @@ import pandas as pd
 
 def retrieve_orders(cuid:str):
     """
-    Retrieves a orders assigned for the given cuid.
+    gets orders list for cuid
     
     Args:
         cuid (str): The cuid of the technician.
     
     Returns:
-        orders (dict): dictionary of orders with details.
+        orders (array): array of order details containing dictionaries
         
     """
-    print(f"Retrieving orders for cuid: {cuid}")
+    #print(f"Retrieving orders for cuid: {cuid}")
     api_url = "http://34.66.37.185:8085/getOrderDetails"
     params = {}
     if cuid:
@@ -30,13 +30,15 @@ def retrieve_orders(cuid:str):
             df=pd.DataFrame(response.json())
             df['DueDate']=pd.to_datetime(df['DueDate'])
             df.sort_values(by='DueDate')
+            df = df.head(5)
             response = df.to_json(orient = 'records')
+            
 
         else:
             print("Error:", response.status_code)
             print("Response:", response.text)
-            
-        return response
+        #print(response)
+        return {"success": True, "message": "order fetch successfull", "response": {"orders":response}}
     
     except Exception as e:
         print("An error occurred:", str(e))
@@ -175,33 +177,36 @@ def activation_tool(cuid : str,
       'Content-Type': 'application/json'
     }
 
-    
+    #print('payload: ',payload)
     try:
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
         result = response.json()
-        transaction_id = result.get('transactionId')  
+        #transaction_id = result.get('transaction_id')  
+        #print('payload: ',payload)
+        #print('result: ',result)
         log_type = 'activation'
         while True:
             result = show_live_logs(transaction_id, log_type)
             status = result.get('status')
-            print(f"Activation result: {result}")
+            #print(f"Activation result: {result}")
 
             if status == 'SUCCESS':
                 print('Successful activation')
                 return {"success": True, "message": "Successful activation", "response": result}
 
-            else:
+            elif status == 'FAILED':
                 print('Activation failed')
                 return {"success": False, "message": "Activation failed", "response": result}
-
+            else:
+                pass
             # Sleep for 5 seconds before the next status check
             time.sleep(5)
         
     except requests.RequestException as e:
         print(f'Error: {e}')
         return None
-            
+
 
 
 
@@ -221,6 +226,21 @@ def show_live_logs(trasaction_id:str, log_type:str):
             
     except requests.RequestException as e:
         print(f'Error: {e}')
-        
+
     
-            
+
+
+def prioritize_order(orders:str):
+    """
+    Prioritizes output based on the due date and returns the order details
+    
+    Args:
+        orders (str): this is array of orders in string format
+        
+    Returns:
+        dict: prioritized order details
+    """
+    #print(orders)    
+    parsed = json.loads(orders)
+    result = parsed[0]
+    return {"success": True, "message": "Activation failed", "response": {"prioritized_order": result}}

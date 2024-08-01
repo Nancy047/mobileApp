@@ -1,45 +1,69 @@
-import vertexai
-
-import asyncio
-#from flask_socketio import SocketIO, emit
-#from flask import Flask, request
-import uvicorn
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from inner_agent import InnerAgent
-from session_manager import session_manager
-from vertexai.generative_models import (
-    GenerativeModel,
+from vertexai.preview.generative_models import (
+    FunctionDeclaration,
     GenerationConfig,
+    GenerativeModel,
+    Part,
+    Tool,
     SafetySetting,
     HarmCategory,
     HarmBlockThreshold,
-    ChatSession
+    ChatSession,ToolConfig
 )
-import traceback
 import json
-import os
-vertexai.init()
+from tools import autodiscover_tool, activation_tool,retrieve_orders, prioritize_order
+import traceback
 
-app = FastAPI()
-
-class UserInput(BaseModel):
-    user_input: str 
 
 class Orchestrator:
     def __init__(self):
-        self.current_step = 0
-        # self.app = Flask(__name__)
-        # self.socketio = SocketIO(self.app)
-        # Wrap the Flask application with socketio.WSGIApp
-        self.inner_agent = InnerAgent()
-        self.intermediate_parameters = {}
-        self.plan_steps = []
- 
-        # Initialize the chat model
-        self.chat_model = GenerativeModel(model_name="gemini-1.5-pro-001")
-        self.chat = self.chat_model.start_chat()
+       
+        self.system_prompt = ['''
+        Role: You are task executor. who utilizes available tools to complete the task
+        you will receive task to be completed and available parameters.
+        input format 
+        {"step": {"type": "integer", "description": "current step number"},
+        "task": {"type": "string", "description": "task to be completed"},
+        "user_input": {"type": "string", "description": "user input to previous output, might be empty if you didnt expect an input"},
+        "available_parameters":{"type": "json" , "description": "dictionary of available parameters and their values"}
+        
+        Rules: Follow the response format.
+        Tasks:    
+        1. check if you have functions available to complete the task. Detect tool needed to call.
+        2. check if you have all the required parameters to run the tool.
+        3. if you dont have tools to complete the task, try to do it manually.
+        4. if you dont have the required parameters needed for the step, dont change the step number
+        5. if you have all the required parameters then trigger the tool
+        6. if you have already asked for user input then wait for his response, check if the user input satisfies the task and increment step if it does.
+        7. Only perform task from the point you stopped, don't retrigger the tool.
+        Response format:
+         
+        "step": {"type": integer, "description": "increment only if the completion status is completed"},
+        "input_needed": {"type": boolean, "description": "This will tell the model if user input is required"} ,
+        "input_type": {"type": string, "description": "What type of input is expected from user [confirmation or parameters]"} ,
+        "step_details": {"type": "string", "description": "This is step description in the sense what is expected for step to be complete"} ,
+        "step_status": {"type": "string", "description": "This is current situation or status of the task"} ,
+        "parameters": {"type": array, "description": "if the input type is parameters then this would contain what all parameters required from user else it ill be empty list"},
+        "completion_status": {"type": string, "description": "This will either say 'pending', 'failed' or 'completed'"}
+        ''']
+
+        self.generation_config = GenerationConfig(response_mime_type="application/json")
+        self.tool_config = ToolConfig(
+            function_calling_config =
+                ToolConfig.FunctionCallingConfig(
+                    mode=ToolConfig.FunctionCallingConfig.Mode.AUTO,  # The default model behavior. The model decides whether to predict a function call or a natural language response.
+                    #mode=ToolConfig.FunctionCallingConfig.Mode.ANY,  # ANY mode forces the model to predict a function call from a subset of function names.
+                    #mode=ToolConfig.FunctionCallingConfig.Mode.NONE,  # NONE mode instructs the model to not predict function calls. Equivalent to a model request without any function declarations.
+                    #allowed_function_names = ["function_to_call"]  # Allowed functions to call when mode is ANY, if empty any one of the provided functions will be called.
+                )
+        )
+        self.prioritize_order_func =  FunctionDeclaration.from_func(prioritize_order)
+        #print(self.prioritize_order_func)
+        self.get_orders_func = FunctionDeclaration.from_func(retrieve_orders)
+        self.run_autodiscover_func = FunctionDeclaration.from_func(autodiscover_tool)
+        self.run_activation_func = FunctionDeclaration.from_func(activation_tool)
+        
+        self.ont_tool = Tool(function_declarations=[self.get_orders_func, self.run_autodiscover_func, self.run_activation_func, self.prioritize_order_func])
+        
         self.safety_config = [
                         SafetySetting(
                             category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
@@ -58,267 +82,94 @@ class Orchestrator:
                             threshold=HarmBlockThreshold.BLOCK_NONE,
                         ),
                     ]
-        self.generation_config = GenerationConfig(response_mime_type="application/json")
-
- 
-    async def run_task(self, user_input, websocket: WebSocket):
-        session_id = session_manager.create_session()
-        session_manager.update_session_data(session_id, 'cuid', user_input)
         
+        self.inner_model = GenerativeModel(model_name="gemini-1.5-pro-001",
+                                           system_instruction = self.system_prompt,
+                                           generation_config=GenerationConfig(temperature=0.1),
+                                           tools=[self.ont_tool], 
+                                           tool_config = self.tool_config,
+                                           safety_settings= self.safety_config,)
+        self.parse_model_response = GenerativeModel(model_name="gemini-1.5-flash-001",
+                                     system_instruction = ["convert the string to proper json format"])
+        
+        
+        self.orch_chat = self.inner_model.start_chat(responder = None)
+        
+        with open('access_plans.json', 'r') as file:
+            self.plan_steps = json.load(file)
+            
+        #self.afc_responder = AutomaticFunctionCallingResponder()
+        
+    async def parse_response(self, response):
         try:
-            # Initial step: get order list and prioritize ---
-            print("Starting task with user input:", user_input)
-            agent_response, order_list = await self.inner_agent.execute_task("what are the orders assigned for cuid? given in parameters", {'cuid':user_input})
-            self.intermediate_parameters.update({'cuid':user_input})
-            order_list = json.loads(order_list)
-            print("Retrieved order list:", order_list)
-            session_manager.update_session_data(session_id, 'order_list', order_list)
-            
-            # Prioritize order based on timestamp ----
-            prioritized_order = await self.prioritize_order(order_list)
-            self.intermediate_parameters.update(prioritized_order)
-            print("Prioritized order:", prioritized_order)
-            
-            # Generate confirmation prompt using the model ----
-            #confirmation_prompt = await self.generate_prompt(
-            #    f"The prioritized order is: {prioritized_order}. Do you want to proceed with this order?"
-            #)
-            # Ask for confirmation from the technician
-            
-            question = "Do you want to proceed with this order?"
-            
-            confirmed = await self.get_confirmation_from_technician(session_id, question, prioritized_order, websocket)
-
-            print("Confirmation received:", confirmed)
-            if not confirmed:
-                print("Technician did not confirm to proceed with the order.")
-                return
-            print("Technician confirmed to proceed with the order.")
- 
-            # Load the appropriate plan based on the order type ----
-            print("Loading plan based on order type")
-        
-            order_type = prioritized_order.get("Work_Type_Name")
-            # if not order_type:
-            #     websocket.send_text("Order type is missing.")
-            #     return
-            # if 'install' in order_type:
-            plan_file = f'installation_plan.json'
-            print(f"Looking for plan file: {plan_file}")
-            if not os.path.exists(plan_file):
-                print(f"Plan file {plan_file} does not exist.")
-                return
- 
-            with open(plan_file, 'r') as file:
-                self.plan_steps = json.load(file)
-            print("Loaded plan for order type:", order_type)
- 
-            # Execute the plan steps
-            print("Executing plan steps")
-            await self.execute_plan_steps(session_id, websocket)
- 
+            parsed_response = self.parse_model_response.generate_content(response.text,generation_config = self.generation_config)
+            parsed_response = json.loads(parsed_response.text)
+            return parsed_response
         except Exception as e:
-            print(f"An error occurred: {str(e)}")
-            print(traceback.format_exc())
- 
-    async def prioritize_order(self, order_list):
-        # Prioritize the order list based on timestamp
-        print("Prioritizing order list")
-        return order_list[0]
- 
-    async def execute_plan_steps(self, session_id, websocket:WebSocket):
-        while self.current_step < len(self.plan_steps):
-            step_details = self.plan_steps[self.current_step]
-            print(f"Executing step {self.current_step}: {step_details}")
- 
-            # Check and request missing parameters
-            if "parameters" in step_details:
-                print(f"Checking parameters for step {self.current_step}: {step_details['parameters']}")
-                valid, missing_params = self.validate_parameters(step_details["parameters"])
-                if not valid:
-                    for param in missing_params:
-                        parameter_prompt = await self.generate_prompt(f"Please provide the value for {param}:")
-                        print(f"Asking for missing parameter {param}")
-                        param_response = await self.get_input_from_technician(session_id, parameter_prompt,param, websocket)
-                        print(f"Received user input from technician: {param_response}")
-                        self.intermediate_parameters[param.strip()] = param_response
-                parameters_dict = {param: self.intermediate_parameters[param] for param in step_details["parameters"]}
-                print(f"Parameters for step {self.current_step}: {parameters_dict}")
- 
-            # Execute tool for the current step using the inner agent
-            print(f"Executing tool for step {self.current_step}: {step_details['task']} with parameters {parameters_dict}")
-            intermediate_results, data = await self.inner_agent.execute_task(step_details['task'], parameters_dict)
+            print("parse response: ", response)
+            raise e
+    
+    async def agent_executor(self, session_manager, session_id,user_input, tool, step):
+        try:
+            #print(self.ont_tool)
+            #self.ont_tool = Tool(function_declarations=[self.get_orders_func, self.run_autodiscover_func, self.run_activation_func])
+            task = self.plan_steps[tool][step]['task']
+            last_step = self.plan_steps[tool][-1]['step']
             
+            step = self.plan_steps[tool][step]['step']
+            available_parameters = session_manager.get_session_data(session_id)
+            if 'orders' in available_parameters and step != 1:
+                available_parameters['orders'] = []
+            #print("input prompt "+f'"step": "{step}", "task": "{task}"')#, "available_parameters": {available_parameters}')
+            response, function_call_result = await self.execute_task(user_input, task, step, parameters = str(available_parameters))
+            parsed_response = await self.parse_response(response)
+            parsed_response["tool"] = tool
             
-            message = {"type": "display", "message":intermediate_results}
-            await  websocket.send_text(json.dumps(message))
-            print(f"Intermediate results for step {self.current_step}: {intermediate_results}")
- 
-            # Update intermediate parameters with results from the step
-            self.intermediate_parameters.update(data)
-            print(f"Updated intermediate parameters: {self.intermediate_parameters}")
- 
-            # Persist intermediate parameters in the session
-            session_manager.update_session_data(session_id, 'intermediate_parameters', self.intermediate_parameters)
-            print("Intermediate parameters saved to session")
- 
-            self.current_step += 1
-            print("Next step:", self.current_step)
+            if function_call_result: 
+                parsed_response['data'] = function_call_result['response'] 
             
-            await self.post_task_interaction(websocket,session_id)
- 
-    def validate_parameters(self, required_params):
-        print(f"Validating parameters: {required_params}")
-        print(f"existing parameters : {self.intermediate_parameters}")
-        missing_params = [param for param in required_params if param not in self.intermediate_parameters]
-        if missing_params:
-            print(f"Missing parameters: {missing_params}")
-            return False, missing_params
-        return True, []
- 
-    async def generate_prompt(self, prompt_text):
-        print(f"Generating prompt with model: {prompt_text}")
-        response = await self.ask_model(f"Generate a prompt for the technician: {prompt_text}")
-        return response.strip()
- 
-    async def get_confirmation_from_technician(self, session_id, question, prioritized_order, websocket: WebSocket):
-        #print(f"Asking confirmation with prompt: {prompt}")
-        #self.socketio.emit('message', {'request': prompt})
-        #response = await self.get_user_input()
-        message = {"type": "input", "message":question, "data":json.dumps(prioritized_order)}
-        await websocket.send_text(json.dumps(message))
-        response = await self.handle_user_input(websocket, session_id)
-        
-        print("user responsed with :",response)
-        confirmation_check_prompt = f"The technician responded with: {response}. Did they confirm? answer with just (yes/no)"
-        confirmation = await self.ask_model(confirmation_check_prompt)
-        confirmed = confirmation.strip().lower().replace('.','') == 'yes'
-        print(f"Confirmation response: {confirmation} interpreted as {confirmed}")
-        return confirmed
- 
-    async def get_input_from_technician(self, session_id, prompt,param, websocket: WebSocket):
-        print(f"Asking for input with prompt: {prompt}")
-        # self.socketio.emit('message', {'request': prompt})
-        # response = await self.get_user_input()
-        message = {"type": "input", "message":prompt, "data_needed": param}
-        #handle user input 
-        await  websocket.send_text(json.dumps(message))
-        response = await self.handle_user_input(websocket, session_id)
-        print(f"Received user input: {response}")
-        return response.strip()
- 
-    async def ask_model(self, prompt, config = None):
-        print(f"Asking model with prompt: {prompt}")
-        response = []
-        if not config:
-            for chunk in self.chat.send_message(prompt, stream=True, safety_settings=self.safety_config):
-                response.append(chunk.text)
-        else: 
-            for chunk in self.chat.send_message(prompt, stream=True, safety_settings=self.safety_config, generation_config=config):
-                response.append(chunk.text)
-        full_response = "".join(response)
-        print(f"Model response: {full_response}")
-        return full_response
-
-    async def post_task_interaction(self, websocket: WebSocket, session_id):
-        while True:
-            # Explain the situation to the model and generate a prompt to ask the technician about moving to the next order
-            situation_description = (
-                "The order has been activated. "
-                "Please ask the technician if they want to move to the next order."
-            )
-            next_order_prompt = await self.generate_prompt(situation_description)
-            message = {"type": "input", "message":next_order_prompt}
-            await  websocket.send_text(json.dumps(message))
-
-            # Receive response from the technician
-            response = await self.handle_user_input(websocket, session_id)
-            
-            # Confirm the technician's response using the model
-            confirmation_check_prompt = (
-                f"The technician responded with: {response}. "
-                "Do they want to move to the next order (yes) or not (no)?"
-            )
-            confirmation = await self.ask_model(confirmation_check_prompt)
-            if confirmation.strip().lower() == 'yes':
-                # If the technician wants to move to the next order, update the order list and restart the process
-                message = {"type": "input", "message":"Moving to the next order."}
-                await  websocket.send_text(json.dumps(message))
-                session_data = session_manager.get_session_data(session_id)
-                order_list = session_data.get('order_list', [])
-                if order_list:
-                    order_list.pop(-1)  # Remove the completed order
-                    session_manager.update_session_data(session_id, 'order_list', order_list)
-                    if order_list:
-                        prioritized_order = order_list[-1]
-                        self.intermediate_parameters = {'order_list': order_list}
-                        order_type = prioritized_order.get("Work_Type_Name")
-                        
-                        #if 'install' in order_type:
-                        plan_file = f'installation_plan.json'
-
-                        with open(plan_file, 'r') as file:
-                            self.plan_steps = json.load(file)
-
-                        # Execute the plan steps for the next order
-                        await self.execute_plan_steps(session_id, websocket)
-                        
-                    else:
-                        message = {"type": "display", "message":"No more orders in the list."}
-                        await websocket.send_text(json.dumps(message))
-                        await websocket.close()
-                break
+                
+                session_manager.update_session_data(session_id, data = parsed_response['data'])
+            else: parsed_response['data'] = []
+            #print(parsed_response)
+                
+            if parsed_response["parameters"]:
+                #parsed_response["parameters"] = parsed_response["parameters"].split(',')
+                pass
             else:
-                # If the technician does not want to move to the next order, ask if they need any other help
-                help_prompt_description = (
-                    "The technician does not want to move to the next order. "
-                    "Please ask if they need any other help."
-                )
-                help_prompt = await self.generate_prompt(help_prompt_description)
-                message = {"type": "input", "message":help_prompt}
-                await websocket.send_text(json.dumps(message))
-                help_response = await self.handle_user_input(websocket, session_id)
+                parsed_response["parameters"] = []
+            if step != last_step:
+                parsed_response['completion_status'] = 'pending'
+            return parsed_response
+        except Exception as e:
+            print("inner agent exception", e)
+            #print(traceback.format_exc())
 
-                follow_up_prompt = await self.generate_prompt(
-                    f"Thank you for your request: {help_response}. "
-                    "The techassist will reach out to you shortly"
-                )
-                message = {"type": "display", "message":follow_up_prompt}
-                await websocket.send_text(json.dumps(message))
-                # End the session gracefully
-                message = {"type": "display", "message":"Thank you for using the service. Ending the session."}
-                await websocket.send_text(json.dumps(message))
-                await websocket.close()
-                break
-                
-    async def handle_user_input(self, websocket: WebSocket, session_id):
-        response = await websocket.receive_json()
-        if response['type'] == 'cuid':
-            await self.run_task(response['data'], websocket)
-            await websocket.close()
-        elif response['data'].lower() in ['quit', 'q','exit'] :
-            await websocket.close()
-        else:
-            return response['data'] 
         
-                
-orchestrator = Orchestrator()
+        
+    async def execute_task(self,user_input, task, step, parameters):
+        input_prompt = '{' +f'"step": "{step}","user_input": "{user_input}", "task": "{task}", "available_parameters": "{parameters}"' + '}'
+        print(input_prompt)
+        response = self.orch_chat.send_message(input_prompt)
+        function_call_result = []
+        #print("orchestrator first: ",response)
+        try:
+            chosen_candidate = response.candidates[0].function_calls[0]
+            name = chosen_candidate.name
+            #print("function call name: ", name)
+            function_args = type(chosen_candidate).to_dict(chosen_candidate)["args"]
+            callable_function = self.ont_tool._callable_functions.get(name)
+            function_call_result = callable_function._function(**function_args)
+            #print(function_call_result)
+            response = self.orch_chat.send_message(Part.from_function_response(
+                    name=name,
+                    response={"result":function_call_result},))
+            #print(response)
+            
+        except Exception as e: 
+            function_call_result = None                 
+            #print("No function call needed :",e)
+        
+        
+        return response, function_call_result
  
-#@orchestrator.app.route('/start_task', methods=['POST'])
-
-@app.websocket("/start_task")
-async def start_task(websocket:WebSocket):
-    # data = request.json
-    # user_input = data['user_input']
-    # print("Starting task with user input:", user_input)
-    # asyncio.run(orchestrator.run_task(user_input))
-    # return {"status": "Task started"}
-    await websocket.accept()
-    
-    response = await websocket.receive_json()
-    user_input = response['data']
-    await orchestrator.run_task(user_input, websocket)
-    await websocket.close()
-    
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, ws_ping_interval=10)
