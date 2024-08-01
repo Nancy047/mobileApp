@@ -7,7 +7,7 @@ on:
 env:
   GCP_APP_NAME: mobile-app
   PROJECT_ID: lumen-b-ctl-047
-  GCP_CLUSTER_NAME: my-gke-cluster
+  GCP_CLUSTER_NAME: b-ctl-dev-cluster
   GCP_CLUSTER_LOCATION: us-central1-c
   GCP_CLUSTER_NAMESPACE: default
   GKE_SA_KEY: ${{ secrets.GCP_SA_KEY }}
