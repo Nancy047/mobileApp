@@ -1,0 +1,24 @@
+{ 
+    "installation" : [
+        {
+            "step": 0,
+            "task": "Get order list using cuid",
+            "next": 1
+        },
+        {
+            "step": 1,
+            "task": "prioritize orders based on due date. so that you can start working on the order. Get technician's confirmation of the prioritized order to move on to next task",
+            "next": 2
+        },
+
+        {
+            "step": 2,
+            "task": "Run Autodiscover is to start ont activation process (check if you have required information first)",
+            "next": 3
+        },
+        {
+            "step": 3,
+            "task": "Run Activation Function, if this is successfull ont acivation for installation is completed.",
+            "next": null
+        }]
+}
